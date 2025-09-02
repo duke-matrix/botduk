@@ -3,12 +3,12 @@ name: Test Bot
 on:
 workflow_dispatch:
 
-#Add concurrency group to prevent parallel runs
+# Add concurrency group to prevent parallel runs
 concurrency:
 group: ${{ github.workflow }}
 cancel-in-progress: false
 
-Daily job to run the simple forecast bot
+# Daily job to run the simple forecast bot
 jobs:
 forecast_job:
 runs-on: ubuntu-latest # determines the machine that will run the job - keep as is
