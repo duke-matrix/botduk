@@ -3,7 +3,7 @@ name: Test Bot
 on:
 workflow_dispatch:
 
-Add concurrency group to prevent parallel runs
+#Add concurrency group to prevent parallel runs
 concurrency:
 group: ${{ github.workflow }}
 cancel-in-progress: false
