@@ -1,484 +1,354 @@
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "metadata": {},
-   "outputs": [],
-   "source": [
-    "import argparse\n",
-    "import asyncio\n",
-    "import logging\n",
-    "import os\n",
-    "import uuid\n",
-    "from datetime import datetime\n",
-    "from typing import Literal\n",
-    "\n",
-    "import dotenv\n",
-    "from forecasting_tools import (\n",
-    "    BinaryQuestion,\n",
-    "    ForecastBot,\n",
-    "    GeneralLlm,\n",
-    "    MetaculusApi,\n",
-    "    MetaculusQuestion,\n",
-    "    MultipleChoiceQuestion,\n",
-    "    NumericDistribution,\n",
-    "    NumericQuestion,\n",
-    "    Percentile,\n",
-    "    BinaryPrediction,\n",
-    "    PredictedOptionList,\n",
-    "    ReasonedPrediction,\n",
-    "    clean_indents,\n",
-    "    structure_output,\n",
-    ")\n",
-    "\n",
-    "# New imports for added functionality\n",
-    "# Make sure to install them: \n",
-    "# pip install mixpanel-api tavily-python newsapi-python python-dotenv\n",
-    "from mixpanel import Mixpanel\n",
-    "from newsapi import NewsApiClient\n",
-    "from tavily import TavilyClient\n",
-    "\n",
-    "dotenv.load_dotenv()\n",
-    "\n",
-    "logger = logging.getLogger(__name__)\n",
-    "\n",
-    "######################### CONSTANTS & API CLIENTS #########################\n",
-    "\n",
-    "# --- Run Tracking ---\n",
-    "RUN_ID = str(uuid.uuid4()) # Generate a unique ID for this script run for tracking\n",
-    "\n",
-    "# --- Environment Variables & API Keys ---\n",
-    "OPENROUTER_API_KEY = os.getenv(\"OPENROUTER_API_KEY\")\n",
-    "TAVILY_API_KEY = os.getenv(\"TAVILY_API_KEY\")\n",
-    "NEWSAPI_API_KEY = os.getenv(\"NEWSAPI_API_KEY\")\n",
-    "MIXPANEL_TOKEN = os.getenv(\"MIXPANEL_TOKEN\")\n",
-    "\n",
-    "# --- API Clients ---\n",
-    "tavily_client = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None\n",
-    "newsapi_client = NewsApiClient(api_key=NEWSAPI_API_KEY) if NEWSAPI_API_KEY else None\n",
-    "mixpanel_client = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None\n",
-    "\n",
-    "# --- OpenRouter Configuration ---\n",
-    "OPENROUTER_MODEL = \"anthropic/claude-3.5-sonnet\"\n",
-    "OPENROUTER_PARSER_MODEL = \"openai/gpt-4o-mini\"\n",
-    "\n",
-    "\n",
-    "######################### HELPER FUNCTIONS #########################\n",
-    "\n",
-    "def track_event(event_name: str, properties: dict = None):\n",
-    "    \"\"\"\n",
-    "    Tracks an event using Mixpanel if the client is configured.\n",
-    "    \"\"\"\n",
-    "    if not mixpanel_client:\n",
-    "        return\n",
-    "    \n",
-    "    event_properties = {\n",
-    "        'run_id': RUN_ID,\n",
-    "        'model': OPENROUTER_MODEL,\n",
-    "        'timestamp': datetime.utcnow().isoformat()\n",
-    "    }\n",
-    "    if properties:\n",
-    "        event_properties.update(properties)\n",
-    "    \n",
-    "    try:\n",
-    "        mixpanel_client.track(distinct_id=RUN_ID, event_name=event_name, properties=event_properties)\n",
-    "        logger.info(f\"[Mixpanel] Tracked event: {event_name}\")\n",
-    "    except Exception as e:\n",
-    "        logger.error(f\"[Mixpanel] Error tracking event: {e}\")\n",
-    "\n",
-    "\n",
-    "class FallTemplateBot2025(ForecastBot):\n",
-    "    \"\"\"\n",
-    "    This is a modified copy of the template bot for Fall 2025 Metaculus AI Tournament,\n",
-    "    updated to use OpenRouter, Tavily, NewsAPI, and Mixpanel.\n",
-    "    \"\"\"\n",
-    "\n",
-    "    _max_concurrent_questions = 3\n",
-    "    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)\n",
-    "\n",
-    "    def _call_tavily(self, question_text: str) -> str:\n",
-    "        \"\"\"Performs a web search using Tavily and returns a formatted string of results.\"\"\"\n",
-    "        if not tavily_client:\n",
-    "            logger.warning(\"[Tavily] Tavily API key not set. Skipping search.\")\n",
-    "            return \"Tavily search not performed.\"\n",
-    "        try:\n",
-    "            response = tavily_client.search(query=question_text, search_depth=\"advanced\")\n",
-    "            results = \"\\n\".join([f\"- {r['content']}\" for r in response['results']])\n",
-    "            return f\"Web Search Results:\\n{results}\"\n",
-    "        except Exception as e:\n",
-    "            logger.error(f\"Tavily search failed: {e}\")\n",
-    "            return f\"Tavily search failed: {e}\"\n",
-    "\n",
-    "    def _call_newsapi(self, question_text: str) -> str:\n",
-    "        \"\"\"Fetches recent news articles from NewsAPI and returns a formatted string.\"\"\"\n",
-    "        if not newsapi_client:\n",
-    "            logger.warning(\"[NewsAPI] NewsAPI key not set. Skipping news search.\")\n",
-    "            return \"NewsAPI search not performed.\"\n",
-    "        try:\n",
-    "            all_articles = newsapi_client.get_everything(\n",
-    "                q=question_text,\n",
-    "                language='en',\n",
-    "                sort_by='relevancy',\n",
-    "                page_size=5\n",
-    "            )\n",
-    "            if not all_articles or not all_articles['articles']:\n",
-    "                return \"No recent news articles found.\"\n",
-    "\n",
-    "            formatted_articles = \"\"\n",
-    "            for article in all_articles['articles']:\n",
-    "                formatted_articles += f\"- Title: {article['title']}\\n  Source: {article['source']['name']}\\n  Snippet: {article.get('description', 'N/A')}\\n\"\n",
-    "            return f\"Recent News:\\n{formatted_articles}\"\n",
-    "        except Exception as e:\n",
-    "            logger.error(f\"NewsAPI search failed: {e}\")\n",
-    "            return f\"NewsAPI search failed: {e}\"\n",
-    "\n",
-    "    async def run_research(self, question: MetaculusQuestion) -> str:\n",
-    "        \"\"\"Orchestrates research calls to Tavily and NewsAPI and combines results.\"\"\"\n",
-    "        async with self._concurrency_limiter:\n",
-    "            track_event(\"Research Started\", {\"question_url\": question.page_url})\n",
-    "            \n",
-    "            # Run sync research functions in a thread to avoid blocking async event loop\n",
-    "            loop = asyncio.get_event_loop()\n",
-    "            tavily_task = loop.run_in_executor(None, self._call_tavily, question.question_text)\n",
-    "            news_task = loop.run_in_executor(None, self._call_newsapi, question.question_text)\n",
-    "            \n",
-    "            tavily_results = await tavily_task\n",
-    "            news_results = await news_task\n",
-    "            \n",
-    "            research = f\"{tavily_results}\\n\\n{news_results}\"\n",
-    "            \n",
-    "            logger.info(f\"Found Research for URL {question.page_url}:\\n{research}\")\n",
-    "            track_event(\"Research Completed\", {\"research_length\": len(research), \"question_url\": question.page_url})\n",
-    "            return research\n",
-    "\n",
-    "    async def _run_forecast_on_binary(\n",
-    "        self, question: BinaryQuestion, research: str\n",
-    "    ) -> ReasonedPrediction[float]:\n",
-    "        track_event(\"Forecast Started\", {\"question_url\": question.page_url, \"question_type\": \"binary\"})\n",
-    "        prompt = clean_indents(\n",
-    "            f\"\"\"\n",
-    "            You are a professional forecaster interviewing for a job.\n",
-    "\n",
-    "            Your interview question is:\n",
-    "            {question.question_text}\n",
-    "\n",
-    "            Question background:\n",
-    "            {question.background_info}\n",
-    "\n",
-    "\n",
-    "            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:\n",
-    "            {question.resolution_criteria}\n",
-    "\n",
-    "            {question.fine_print}\n",
-    "\n",
-    "\n",
-    "            Your research assistant says:\n",
-    "            {research}\n",
-    "\n",
-    "            Today is {datetime.now().strftime(\"%Y-%m-%d\")}.\n",
-    "\n",
-    "            Before answering you write:\n",
-    "            (a) The time left until the outcome to the question is known.\n",
-    "            (b) The status quo outcome if nothing changed.\n",
-    "            (c) A brief description of a scenario that results in a No outcome.\n",
-    "            (d) A brief description of a scenario that results in a Yes outcome.\n",
-    "\n",
-    "            You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.\n",
-    "\n",
-    "            The last thing you write is your final answer as: \"Probability: ZZ%\", 0-100\n",
-    "            \"\"\"\n",
-    "        )\n",
-    "        reasoning = await self.get_llm(\"default\", \"llm\").invoke(prompt)\n",
-    "        logger.info(f\"Reasoning for URL {question.page_url}: {reasoning}\")\n",
-    "        binary_prediction: BinaryPrediction = await structure_output(\n",
-    "            reasoning, BinaryPrediction, model=self.get_llm(\"parser\", \"llm\")\n",
-    "        )\n",
-    "        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))\n",
-    "\n",
-    "        logger.info(\n",
-    "            f\"Forecasted URL {question.page_url} with prediction: {decimal_pred}\"\n",
-    "        )\n",
-    "        track_event(\"Forecast Succeeded\", {\"question_url\": question.page_url})\n",
-    "        return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)\n",
-    "\n",
-    "    async def _run_forecast_on_multiple_choice(\n",
-    "        self, question: MultipleChoiceQuestion, research: str\n",
-    "    ) -> ReasonedPrediction[PredictedOptionList]:\n",
-    "        track_event(\"Forecast Started\", {\"question_url\": question.page_url, \"question_type\": \"multiple_choice\"})\n",
-    "        prompt = clean_indents(\n",
-    "            f\"\"\"\n",
-    "            You are a professional forecaster interviewing for a job.\n",
-    "\n",
-    "            Your interview question is:\n",
-    "            {question.question_text}\n",
-    "\n",
-    "            The options are: {question.options}\n",
-    "\n",
-    "\n",
-    "            Background:\n",
-    "            {question.background_info}\n",
-    "\n",
-    "            {question.resolution_criteria}\n",
-    "\n",
-    "            {question.fine_print}\n",
-    "\n",
-    "\n",
-    "            Your research assistant says:\n",
-    "            {research}\n",
-    "\n",
-    "            Today is {datetime.now().strftime(\"%Y-%m-%d\")}.\n",
-    "\n",
-    "            Before answering you write:\n",
-    "            (a) The time left until the outcome to the question is known.\n",
-    "            (b) The status quo outcome if nothing changed.\n",
-    "            (c) A description of an scenario that results in an unexpected outcome.\n",
-    "\n",
-    "            You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.\n",
-    "\n",
-    "            The last thing you write is your final probabilities for the N options in this order {question.options} as:\n",
-    "            Option_A: Probability_A\n",
-    "            Option_B: Probability_B\n",
-    "            ...\n",
-    "            Option_N: Probability_N\n",
-    "            \"\"\"\n",
-    "        )\n",
-    "        parsing_instructions = clean_indents(\n",
-    "            f\"\"\"\n",
-    "            Make sure that all option names are one of the following:\n",
-    "            {question.options}\n",
-    "            The text you are parsing may prepend these options with some variation of \"Option\" which you should remove if not part of the option names I just gave you.\n",
-    "            \"\"\"\n",
-    "        )\n",
-    "        reasoning = await self.get_llm(\"default\", \"llm\").invoke(prompt)\n",
-    "        logger.info(f\"Reasoning for URL {question.page_url}: {reasoning}\")\n",
-    "        predicted_option_list: PredictedOptionList = await structure_output(\n",
-    "            text_to_structure=reasoning,\n",
-    "            output_type=PredictedOptionList,\n",
-    "            model=self.get_llm(\"parser\", \"llm\"),\n",
-    "            additional_instructions=parsing_instructions,\n",
-    "        )\n",
-    "        logger.info(\n",
-    "            f\"Forecasted URL {question.page_url} with prediction: {predicted_option_list}\"\n",
-    "        )\n",
-    "        track_event(\"Forecast Succeeded\", {\"question_url\": question.page_url})\n",
-    "        return ReasonedPrediction(\n",
-    "            prediction_value=predicted_option_list, reasoning=reasoning\n",
-    "        )\n",
-    "\n",
-    "    async def _run_forecast_on_numeric(\n",
-    "        self, question: NumericQuestion, research: str\n",
-    "    ) -> ReasonedPrediction[NumericDistribution]:\n",
-    "        track_event(\"Forecast Started\", {\"question_url\": question.page_url, \"question_type\": \"numeric\"})\n",
-    "        upper_bound_message, lower_bound_message = (\n",
-    "            self._create_upper_and_lower_bound_messages(question)\n",
-    "        )\n",
-    "        prompt = clean_indents(\n",
-    "            f\"\"\"\n",
-    "            You are a professional forecaster interviewing for a job.\n",
-    "\n",
-    "            Your interview question is:\n",
-    "            {question.question_text}\n",
-    "\n",
-    "            Background:\n",
-    "            {question.background_info}\n",
-    "\n",
-    "            {question.resolution_criteria}\n",
-    "\n",
-    "            {question.fine_print}\n",
-    "\n",
-    "            Units for answer: {question.unit_of_measure if question.unit_of_measure else \"Not stated (please infer this)\"}\n",
-    "\n",
-    "            Your research assistant says:\n",
-    "            {research}\n",
-    "\n",
-    "            Today is {datetime.now().strftime(\"%Y-%m-%d\")}.\n",
-    "\n",
-    "            {lower_bound_message}\n",
-    "            {upper_bound_message}\n",
-    "\n",
-    "            Formatting Instructions:\n",
-    "            - Please notice the units requested (e.g. whether you represent a number as 1,000,000 or 1 million).\n",
-    "            - Never use scientific notation.\n",
-    "            - Always start with a smaller number (more negative if negative) and then increase from there\n",
-    "\n",
-    "            Before answering you write:\n",
-    "            (a) The time left until the outcome to the question is known.\n",
-    "            (b) The outcome if nothing changed.\n",
-    "            (c) The outcome if the current trend continued.\n",
-    "            (d) The expectations of experts and markets.\n",
-    "            (e) A brief description of an unexpected scenario that results in a low outcome.\n",
-    "            (f) A brief description of an unexpected scenario that results in a high outcome.\n",
-    "\n",
-    "            You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.\n",
-    "\n",
-    "            The last thing you write is your final answer as:\n",
-    "            \"\n",
-    "            Percentile 10: XX\n",
-    "            Percentile 20: XX\n",
-    "            Percentile 40: XX\n",
-    "            Percentile 60: XX\n",
-    "            Percentile 80: XX\n",
-    "            Percentile 90: XX\n",
-    "            \"\n",
-    "            \"\"\"\n",
-    "        )\n",
-    "        reasoning = await self.get_llm(\"default\", \"llm\").invoke(prompt)\n",
-    "        logger.info(f\"Reasoning for URL {question.page_url}: {reasoning}\")\n",
-    "        percentile_list: list[Percentile] = await structure_output(\n",
-    "            reasoning, list[Percentile], model=self.get_llm(\"parser\", \"llm\")\n",
-    "        )\n",
-    "        prediction = NumericDistribution.from_question(percentile_list, question)\n",
-    "        logger.info(\n",
-    "            f\"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}\"\n",
-    "        )\n",
-    "        track_event(\"Forecast Succeeded\", {\"question_url\": question.page_url})\n",
-    "        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)\n",
-    "\n",
-    "    def _create_upper_and_lower_bound_messages(\n",
-    "        self, question: NumericQuestion\n",
-    "    ) -> tuple[str, str]:\n",
-    "        if question.nominal_upper_bound is not None:\n",
-    "            upper_bound_number = question.nominal_upper_bound\n",
-    "        else:\n",
-    "            upper_bound_number = question.upper_bound\n",
-    "        if question.nominal_lower_bound is not None:\n",
-    "            lower_bound_number = question.nominal_lower_bound\n",
-    "        else:\n",
-    "            lower_bound_number = question.lower_bound\n",
-    "\n",
-    "        if question.open_upper_bound:\n",
-    "            upper_bound_message = f\"The question creator thinks the number is likely not higher than {upper_bound_number}.\"\n",
-    "        else:\n",
-    "            upper_bound_message = (\n",
-    "                f\"The outcome can not be higher than {upper_bound_number}.\"\n",
-    "            )\n",
-    "\n",
-    "        if question.open_lower_bound:\n",
-    "            lower_bound_message = f\"The question creator thinks the number is likely not lower than {lower_bound_number}.\"\n",
-    "        else:\n",
-    "            lower_bound_message = (\n",
-    "                f\"The outcome can not be lower than {lower_bound_number}.\"\n",
-    "            )\n",
-    "        return upper_bound_message, lower_bound_message\n",
-    "\n",
-    "\n",
-    "if __name__ == \"__main__\":\n",
-    "    logging.basicConfig(\n",
-    "        level=logging.INFO,\n",
-    "        format=\"%(asctime)s - %(name)s - %(levelname)s - %(message)s\",\n",
-    "    )\n",
-    "\n",
-    "    # Suppress noisy library logging\n",
-    "    logging.getLogger(\"LiteLLM\").setLevel(logging.WARNING)\n",
-    "    logging.getLogger(\"urllib3\").setLevel(logging.WARNING)\n",
-    "\n",
-    "    parser = argparse.ArgumentParser(\n",
-    "        description=\"Run the FallTemplateBot2025 forecasting system\"\n",
-    "    )\n",
-    "    parser.add_argument(\n",
-    "        \"--mode\",\n",
-    "        type=str,\n",
-    "        choices=[\"tournament\", \"metaculus_cup\", \"test_questions\"],\n",
-    "        default=\"tournament\",\n",
-    "        help=\"Specify the run mode (default: tournament)\",\n",
-    "    )\n",
-    "    args = parser.parse_args()\n",
-    "    run_mode: Literal[\"tournament\", \"metaculus_cup\", \"test_questions\"] = args.mode\n",
-    "\n",
-    "    track_event(\"Run Started\", {\"mode\": run_mode})\n",
-    "\n",
-    "    template_bot = FallTemplateBot2025(\n",
-    "        research_reports_per_question=1,\n",
-    "        predictions_per_research_report=3, # Reduced from 5 for faster runs\n",
-    "        use_research_summary_to_forecast=False,\n",
-    "        publish_reports_to_metaculus=True,\n",
-    "        folder_to_save_reports_to=None,\n",
-    "        skip_previously_forecasted_questions=True,\n",
-    "        llms={  # Configure models to use OpenRouter\n",
-    "            \"default\": GeneralLlm(\n",
-    "                model=f\"openrouter/{OPENROUTER_MODEL}\",\n",
-    "                temperature=0.3,\n",
-    "                timeout=60,\n",
-    "                allowed_tries=3,\n",
-    "            ),\n",
-    "            \"parser\": f\"openrouter/{OPENROUTER_PARSER_MODEL}\",\n",
-    "        },\n",
-    "    )\n",
-    "    \n",
-    "    forecast_reports = []\n",
-    "    try:\n",
-    "        if run_mode == \"tournament\":\n",
-    "            seasonal_tournament_reports = asyncio.run(\n",
-    "                template_bot.forecast_on_tournament(\n",
-    "                    MetaculusApi.CURRENT_AI_COMPETITION_ID, return_exceptions=True\n",
-    "                )\n",
-    "            )\n",
-    "            minibench_reports = asyncio.run(\n",
-    "                template_bot.forecast_on_tournament(\n",
-    "                    MetaculusApi.CURRENT_MINIBENCH_ID, return_exceptions=True\n",
-    "                )\n",
-    "            )\n",
-    "            forecast_reports = seasonal_tournament_reports + minibench_reports\n",
-    "        elif run_mode == \"metaculus_cup\":\n",
-    "            template_bot.skip_previously_forecasted_questions = False\n",
-    "            forecast_reports = asyncio.run(\n",
-    "                template_bot.forecast_on_tournament(\n",
-    "                    MetaculusApi.CURRENT_METACULUS_CUP_ID, return_exceptions=True\n",
-    "                )\n",
-    "            )\n",
-    "        elif run_mode == \"test_questions\":\n",
-    "            EXAMPLE_QUESTIONS = [\n",
-    "                \"https://www.metaculus.com/questions/578/human-extinction-by-2100/\",\n",
-    "                \"https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/\",\n",
-    "                \"https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/\",\n",
-    "                \"https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/\",\n",
-    "            ]\n",
-    "            template_bot.skip_previously_forecasted_questions = False\n",
-    "            questions = [\n",
-    "                MetaculusApi.get_question_by_url(question_url)\n",
-    "                for question_url in EXAMPLE_QUESTIONS\n",
-    "            ]\n",
-    "            forecast_reports = asyncio.run(\n",
-    "                template_bot.forecast_questions(questions, return_exceptions=True)\n",
-    "            )\n",
-    "        \n",
-    "        template_bot.log_report_summary(forecast_reports)\n",
-    "\n",
-    "        # Check for errors in reports to determine final status\n",
-    "        has_errors = any(isinstance(report, Exception) for report in forecast_reports)\n",
-    "        if has_errors:\n",
-    "            error_count = sum(1 for report in forecast_reports if isinstance(report, Exception))\n",
-    "            track_event(\"Run Finished With Errors\", {\"error_count\": error_count})\n",
-    "        else:\n",
-    "            track_event(\"Run Finished Successfully\")\n",
-    "            \n",
-    "    except Exception as e:\n",
-    "        logger.error(f\"An unexpected error occurred during the run: {e}\", exc_info=True)\n",
-    "        track_event(\"Run Failed\", {\"error\": str(e)})\n",
-    "        \n"
-   ]
-  }
- ],
- "metadata": {
-  "kernelspec": {
-   "display_name": "Python 3",
-   "language": "python",
-   "name": "python3"
-  },
-  "language_info": {
-   "codemirror_mode": {
-    "name": "ipython",
-    "version": 3
-   },
-   "file_extension": ".py",
-   "mimetype": "text/x-python",
-   "name": "python",
-   "nbconvert_exporter": "python",
-   "pygments_lexer": "ipython3",
-   "version": "3.10.12"
-  }
- },
- "nbformat": 4,
- "nbformat_minor": 4
-}
+"""
+This is the main entry point for the forecasting bot.
+"""
+from __future__ import annotations
 
+import argparse
+import asyncio
+import logging
+import os
+import uuid
+from datetime import datetime
+from typing import Literal
+
+from forecasting_tools import (
+    AskNewsSearcher,
+    BinaryQuestion,
+    ForecastBot,
+    GeneralLlm,
+    MetaculusApi,
+    MetaculusQuestion,
+    MultipleChoiceQuestion,
+    NumericDistribution,
+    NumericQuestion,
+    Percentile,
+    BinaryPrediction,
+    PredictedOptionList,
+    ReasonedPrediction,
+    SmartSearcher,
+    clean_indents,
+    structure_output,
+)
+from mixpanel import Mixpanel
+from newsapi import NewsApiClient
+from tavily import TavilyClient
+
+# --- Environment Variables ---
+# Load environment variables for API keys and tokens
+METACULUS_TOKEN = os.getenv("METACULUS_TOKEN")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+NEWSAPI_API_KEY = os.getenv("NEWSAPI_API_KEY")
+MIXPANEL_TOKEN = os.getenv("MIXPANEL_TOKEN")
+
+# --- Analytics Setup ---
+# Initialize Mixpanel for event tracking
+MIXPANEL_INSTANCE = Mixpanel(MIXPANEL_TOKEN) if MIXPANEL_TOKEN else None
+RUN_ID = str(uuid.uuid4())  # Generate a unique ID for this bot run
+
+# --- Logging Setup ---
+logger = logging.getLogger(__name__)
+
+
+def track_event(event_name: str, properties: dict | None = None) -> None:
+    """
+    Tracks an event using Mixpanel if it's enabled.
+    """
+    if MIXPANEL_INSTANCE:
+        props = properties or {}
+        props["distinct_id"] = RUN_ID
+        props["run_id"] = RUN_ID
+        MIXPANEL_INSTANCE.track(event_name, props)
+
+
+class FallTemplateBot2025(ForecastBot):
+    """
+    A template forecasting bot for the Fall 2025 Metaculus AI Tournament.
+    """
+    _max_concurrent_questions = 1
+    _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
+
+    async def run_research(self, question: MetaculusQuestion) -> str:
+        """
+        Conducts research on a given question using Tavily and NewsAPI.
+        """
+        async with self._concurrency_limiter:
+            track_event("Research Started", {"question_id": question.question_id})
+            research_summary = "No research was conducted."
+            try:
+                tavily_results = self.call_tavily(question.question_text)
+                news_results = self.call_newsapi(question.question_text)
+
+                research_prompt = clean_indents(
+                    f"""
+                    Please synthesize the following research materials into a concise summary for a forecaster.
+                    The question being researched is: "{question.question_text}"
+
+                    Tavily Search Results:
+                    {tavily_results}
+
+                    Recent News Articles:
+                    {news_results}
+
+                    Synthesize the information into a clear, brief summary that will help a forecaster understand the key facts and recent developments related to the question.
+                    """
+                )
+
+                # Use the default LLM to summarize the research
+                summarizer_llm = self.get_llm("default", "llm")
+                research_summary = await summarizer_llm.invoke(research_prompt)
+                track_event("Research Successful", {"question_id": question.question_id, "summary_length": len(research_summary)})
+            except Exception as e:
+                error_message = f"Research failed for question {question.question_id}: {e}"
+                logger.error(error_message)
+                track_event("Research Failed", {"question_id": question.question_id, "error": str(e)})
+
+            logger.info(f"Research for URL {question.page_url}:\n{research_summary}")
+            return research_summary
+
+    def call_tavily(self, query: str) -> str:
+        """
+        Performs a search using the Tavily API.
+        """
+        if not TAVILY_API_KEY:
+            return "Tavily API key not set."
+        try:
+            tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
+            response = tavily_client.search(query=query, search_depth="advanced")
+            return "\n".join([f"- {res['content']}" for res in response["results"]])
+        except Exception as e:
+            return f"Tavily search failed: {e}"
+
+    def call_newsapi(self, query: str) -> str:
+        """
+        Fetches recent news articles using the NewsAPI.
+        """
+        if not NEWSAPI_API_KEY:
+            return "NewsAPI key not set."
+        try:
+            newsapi = NewsApiClient(api_key=NEWSAPI_API_KEY)
+            articles = newsapi.get_everything(q=query, language="en", sort_by="relevancy", page_size=5)
+            return "\n".join([f"- {article['title']}: {article['description']}" for article in articles["articles"]])
+        except Exception as e:
+            return f"NewsAPI search failed: {e}"
+
+    async def _run_forecast_on_binary(
+        self, question: BinaryQuestion, research: str
+    ) -> ReasonedPrediction[float]:
+        prompt = clean_indents(
+            f"""
+            You are a professional forecaster. Your task is to predict the outcome of the following binary question.
+
+            Question: {question.question_text}
+            Background: {question.background_info}
+            Resolution Criteria: {question.resolution_criteria}
+            Fine Print: {question.fine_print}
+            Research Summary: {research}
+            Today's Date: {datetime.now().strftime("%Y-%m-%d")}
+
+            First, provide a step-by-step reasoning for your forecast. Consider the status quo, potential scenarios for "Yes" and "No" outcomes, and the time remaining.
+            Finally, state your final probability as a percentage: "Probability: ZZ%"
+            """
+        )
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        binary_prediction: BinaryPrediction = await structure_output(
+            reasoning, BinaryPrediction, model=self.get_llm("parser", "llm")
+        )
+        decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
+        logger.info(
+            f"Forecasted URL {question.page_url} with prediction: {decimal_pred}"
+        )
+        return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
+
+    async def _run_forecast_on_multiple_choice(
+        self, question: MultipleChoiceQuestion, research: str
+    ) -> ReasonedPrediction[PredictedOptionList]:
+        prompt = clean_indents(
+            f"""
+            You are a professional forecaster. Your task is to predict the outcome of the following multiple-choice question.
+
+            Question: {question.question_text}
+            Options: {question.options}
+            Background: {question.background_info}
+            Resolution Criteria: {question.resolution_criteria}
+            Fine Print: {question.fine_print}
+            Research Summary: {research}
+            Today's Date: {datetime.now().strftime("%Y-%m-%d")}
+
+            First, provide a step-by-step reasoning for your forecast. Consider the status quo and potential unexpected outcomes.
+            Finally, assign a probability to each option in the format:
+            Option_A: Probability_A
+            Option_B: Probability_B
+            ...
+            """
+        )
+        parsing_instructions = clean_indents(
+            f"""
+            Ensure all option names match exactly from this list: {question.options}.
+            Remove any "Option" prefixes if they are not part of the official names.
+            """
+        )
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        predicted_option_list: PredictedOptionList = await structure_output(
+            text_to_structure=reasoning,
+            output_type=PredictedOptionList,
+            model=self.get_llm("parser", "llm"),
+            additional_instructions=parsing_instructions,
+        )
+        logger.info(
+            f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}"
+        )
+        return ReasonedPrediction(
+            prediction_value=predicted_option_list, reasoning=reasoning
+        )
+
+    async def _run_forecast_on_numeric(
+        self, question: NumericQuestion, research: str
+    ) -> ReasonedPrediction[NumericDistribution]:
+        upper_bound_message, lower_bound_message = (
+            self._create_upper_and_lower_bound_messages(question)
+        )
+        prompt = clean_indents(
+            f"""
+            You are a professional forecaster. Your task is to provide a probability distribution for the following numeric question.
+
+            Question: {question.question_text}
+            Unit: {question.unit_of_measure or "Not stated"}
+            Background: {question.background_info}
+            Resolution Criteria: {question.resolution_criteria}
+            Fine Print: {question.fine_print}
+            {lower_bound_message}
+            {upper_bound_message}
+            Research Summary: {research}
+            Today's Date: {datetime.now().strftime("%Y-%m-%d")}
+
+            First, provide a step-by-step reasoning. Consider the status quo, trends, expert opinions, and high/low scenarios.
+            Finally, state your final answer as a series of percentiles:
+            "
+            Percentile 10: XX
+            Percentile 20: XX
+            Percentile 40: XX
+            Percentile 60: XX
+            Percentile 80: XX
+            Percentile 90: XX
+            "
+            """
+        )
+        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
+        percentile_list: list[Percentile] = await structure_output(
+            reasoning, list[Percentile], model=self.get_llm("parser", "llm")
+        )
+        prediction = NumericDistribution.from_question(percentile_list, question)
+        logger.info(
+            f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}"
+        )
+        return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
+
+    def _create_upper_and_lower_bound_messages(
+        self, question: NumericQuestion
+    ) -> tuple[str, str]:
+        upper_bound = question.nominal_upper_bound or question.upper_bound
+        lower_bound = question.nominal_lower_bound or question.lower_bound
+
+        upper_bound_message = (
+            f"The question creator suggests the outcome is likely not higher than {upper_bound}."
+            if question.open_upper_bound
+            else f"The outcome cannot be higher than {upper_bound}."
+        )
+
+        lower_bound_message = (
+            f"The question creator suggests the outcome is likely not lower than {lower_bound}."
+            if question.open_lower_bound
+            else f"The outcome cannot be lower than {lower_bound}."
+        )
+        return upper_bound_message, lower_bound_message
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+
+    litellm_logger = logging.getLogger("LiteLLM")
+    litellm_logger.setLevel(logging.WARNING)
+    litellm_logger.propagate = False
+
+    parser = argparse.ArgumentParser(
+        description="Run the FallTemplateBot2025 forecasting system"
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["tournament", "metaculus_cup", "test_questions"],
+        default="tournament",
+        help="Specify the run mode (default: tournament)",
+    )
+    args = parser.parse_args()
+    run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
+    
+    track_event("Run Started", {"mode": run_mode})
+
+    # --- MODIFIED SECTION ---
+    # The bot is now configured to save reports locally instead of publishing them.
+    template_bot = FallTemplateBot2025(
+        research_reports_per_question=1,
+        predictions_per_research_report=5,
+        use_research_summary_to_forecast=False,
+        publish_reports_to_metaculus=False,  # Set to False to disable publishing
+        folder_to_save_reports_to="predictions/",  # Specify the directory to save reports
+        skip_previously_forecasted_questions=True,
+        llms={
+            "default": GeneralLlm(
+                model="openrouter/openai/gpt-4o",
+                temperature=0.3,
+                timeout=40,
+                allowed_tries=2,
+            ),
+            "parser": "openrouter/openai/gpt-4o-mini",
+        },
+    )
+
+    try:
+        if run_mode == "tournament":
+            seasonal_reports = asyncio.run(
+                template_bot.forecast_on_tournament(
+                    MetaculusApi.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+                )
+            )
+            minibench_reports = asyncio.run(
+                template_bot.forecast_on_tournament(
+                    MetaculusApi.CURRENT_MINIBENCH_ID, return_exceptions=True
+                )
+            )
+            forecast_reports = seasonal_reports + minibench_reports
+        elif run_mode == "metaculus_cup":
+            template_bot.skip_previously_forecasted_questions = False
+            forecast_reports = asyncio.run(
+                template_bot.forecast_on_tournament(
+                    MetaculusApi.CURRENT_METACULUS_CUP_ID, return_exceptions=True
+                )
+            )
+        elif run_mode == "test_questions":
+            EXAMPLE_QUESTIONS = [
+                "https://www.metaculus.com/questions/578/human-extinction-by-2100/",
+                "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",
+                "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",
+                "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",
+            ]
+            template_bot.skip_previously_forecasted_questions = False
+            questions = [
+                MetaculusApi.get_question_by_url(url) for url in EXAMPLE_QUESTIONS
+            ]
+            forecast_reports = asyncio.run(
+                template_bot.forecast_questions(questions, return_exceptions=True)
+            )
+        template_bot.log_report_summary(forecast_reports)
+        track_event("Run Finished Successfully")
+    except Exception as e:
+        error_message = f"Run failed with error: {e}"
+        logger.error(error_message)
+        track_event("Run Finished With Errors", {"error": error_message})
