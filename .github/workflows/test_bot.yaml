@@ -3,16 +3,16 @@ name: Test Bot
 on:
   workflow_dispatch:
 
-# Add concurrency group to prevent parallel runs
+# Prevent parallel runs
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
-# Job to run the simple forecast bot
 jobs:
   forecast_job:
-    runs-on: ubuntu-latest # Determines the machine that will run the job
-    steps: 
+    runs-on: ubuntu-latest
+
+    steps:
       # Step 1: Check out the repository code
       - name: Check out repository
         uses: actions/checkout@v3
@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # Step 3: Install Poetry for dependency management
+      # Step 3: Install Poetry
       - name: Install poetry
         uses: snok/install-poetry@v1
         with:
@@ -31,11 +31,24 @@ jobs:
           virtualenvs-in-project: true
           installer-parallel: true
 
-      # Step 4: Install the project dependencies using Poetry
+      # Step 4: Cache virtual environment
+      - name: Cache poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-
+
+      # Step 5: Ensure lock file is up-to-date
+      - name: Update lock file if needed
+        run: poetry lock --no-interaction --check || poetry lock --no-interaction
+
+      # Step 6: Install dependencies
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
-      # Step 5: Run the bot script in test mode
+      # Step 7: Run the bot
       - name: Run bot
         run: poetry run python main.py --mode test_questions
         env:
