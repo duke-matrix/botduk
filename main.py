@@ -73,7 +73,9 @@ class FallTemplateBot2025(ForecastBot):
         Conducts research on a given question using Tavily and NewsAPI.
         """
         async with self._concurrency_limiter:
-            track_event("Research Started", {"question_id": question.question_id})
+            # --- BUG FIX ---
+            # Changed question.question_id to question.id to prevent AttributeError
+            track_event("Research Started", {"question_id": question.id})
             research_summary = "No research was conducted."
             try:
                 tavily_results = self.call_tavily(question.question_text)
@@ -94,14 +96,14 @@ class FallTemplateBot2025(ForecastBot):
                     """
                 )
 
-                # Use the default LLM to summarize the research
-                summarizer_llm = self.get_llm("default", "llm")
+                # Use the 'summarizer' LLM to summarize the research
+                summarizer_llm = self.get_llm("summarizer", "llm")
                 research_summary = await summarizer_llm.invoke(research_prompt)
-                track_event("Research Successful", {"question_id": question.question_id, "summary_length": len(research_summary)})
+                track_event("Research Successful", {"question_id": question.id, "summary_length": len(research_summary)})
             except Exception as e:
-                error_message = f"Research failed for question {question.question_id}: {e}"
+                error_message = f"Research failed for question {question.id}: {e}"
                 logger.error(error_message)
-                track_event("Research Failed", {"question_id": question.question_id, "error": str(e)})
+                track_event("Research Failed", {"question_id": question.id, "error": str(e)})
 
             logger.info(f"Research for URL {question.page_url}:\n{research_summary}")
             return research_summary
@@ -293,22 +295,24 @@ if __name__ == "__main__":
     track_event("Run Started", {"mode": run_mode})
 
     # --- MODIFIED SECTION ---
-    # The bot is now configured to save reports locally instead of publishing them.
+    # The bot is now configured to both publish reports and save them locally.
+    # It also uses a selection of high-quality, clearly defined OpenRouter models.
     template_bot = FallTemplateBot2025(
         research_reports_per_question=1,
         predictions_per_research_report=5,
         use_research_summary_to_forecast=False,
-        publish_reports_to_metaculus=False,  # Set to False to disable publishing
-        folder_to_save_reports_to="predictions/",  # Specify the directory to save reports
+        publish_reports_to_metaculus=True,  # Set to True to publish to Metaculus
+        folder_to_save_reports_to="predictions/",  # Also save a local copy of reports
         skip_previously_forecasted_questions=True,
         llms={
             "default": GeneralLlm(
-                model="openrouter/openai/gpt-4o",
+                model="anthropic/claude-3.5-sonnet-20240620", # Best for reasoning
                 temperature=0.3,
-                timeout=40,
-                allowed_tries=2,
+                timeout=60,
+                allowed_tries=3,
             ),
-            "parser": "openrouter/openai/gpt-4o-mini",
+            "parser": "openai/gpt-4o-mini", # Best for structured output
+            "summarizer": "google/gemini-2.5-flash-preview-05-20" # Best for summarizing
         },
     )
 
@@ -334,7 +338,7 @@ if __name__ == "__main__":
             )
         elif run_mode == "test_questions":
             EXAMPLE_QUESTIONS = [
-                "https://www.metaculus.com/questions/578/human-extinction-by-2100/",
+                "https://www.metaculus.com/questions/578/human-extinction-by-2025/",
                 "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",
                 "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",
                 "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",
@@ -352,3 +356,4 @@ if __name__ == "__main__":
         error_message = f"Run failed with error: {e}"
         logger.error(error_message)
         track_event("Run Finished With Errors", {"error": error_message})
+
