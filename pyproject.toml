@@ -13,7 +13,7 @@ numpy = "^2.3.0"
 openai = "^1.57.4"
 python-dotenv = "^1.0.1"
 forecasting-tools = "^0.2.54"
-mixpanel-api = "^4.10.0"
+mixpanel = "^4.10.0"
 tavily-python = "^0.3.3"
 newsapi-python = "^0.2.7"
 
