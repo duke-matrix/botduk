@@ -1,46 +1,46 @@
 name: Test Bot
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
-Add concurrency group to prevent parallel runs
+# Add concurrency group to prevent parallel runs
 concurrency:
-group: ${{ github.workflow }}
-cancel-in-progress: false
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
-Job to run the simple forecast bot
+# Job to run the simple forecast bot
 jobs:
-forecast_job:
-runs-on: ubuntu-latest # Determines the machine that will run the job
-steps: # Sets up the steps that will be run in order
-# Step 1: Check out the repository code
-- name: Check out repository
-uses: actions/checkout@v3
+  forecast_job:
+    runs-on: ubuntu-latest # Determines the machine that will run the job
+    steps: 
+      # Step 1: Check out the repository code
+      - name: Check out repository
+        uses: actions/checkout@v3
 
-  # Step 2: Set up the specified Python version
-  - name: Setup Python
-    uses: actions/setup-python@v4
-    with:
-      python-version: "3.11"
+      # Step 2: Set up the specified Python version
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
 
-  # Step 3: Install Poetry for dependency management
-  - name: Install poetry
-    uses: snok/install-poetry@v1
-    with:
-      virtualenvs-create: true
-      virtualenvs-in-project: true
-      installer-parallel: true
+      # Step 3: Install Poetry for dependency management
+      - name: Install poetry
+        uses: snok/install-poetry@v1
+        with:
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+          installer-parallel: true
 
-  # Step 4: Install the project dependencies using Poetry
-  - name: Install dependencies
-    run: poetry install --no-interaction --no-root
+      # Step 4: Install the project dependencies using Poetry
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
 
-  # Step 5: Run the bot script in test mode
-  - name: Run bot
-    run: poetry run python main.py --mode test_questions
-    env:
-      METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-      NEWSAPI_API_KEY: ${{ secrets.NEWSAPI_API_KEY }}
-      MIXPANEL_TOKEN: ${{ secrets.MIXPANEL_TOKEN }}
+      # Step 5: Run the bot script in test mode
+      - name: Run bot
+        run: poetry run python main.py --mode test_questions
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          NEWSAPI_API_KEY: ${{ secrets.NEWSAPI_API_KEY }}
+          MIXPANEL_TOKEN: ${{ secrets.MIXPANEL_TOKEN }}
