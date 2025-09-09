@@ -15,6 +15,11 @@ numpy = "^2.3.0"
 openai = "^1.57.4"
 python-dotenv = "^1.0.1"
 forecasting-tools = "^0.2.54"
+mixpanel = "^4.11.0"
+newsapi-python = "^0.2.7"
+tavily-python = "^0.3.3"
+litellm = "^1.35.0"
+streamlit = "^1.35.0"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -23,3 +28,4 @@ ipykernel = "^6.29.5"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
