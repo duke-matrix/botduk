@@ -36,6 +36,9 @@ jobs:
       #     path: .venv
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
       - name: Install dependencies
+            # Step 5: Ensure lock file is up-to-date
+      - name: Update lock file if needed
+        run: poetry lock --no-interaction --check || poetry lock --no-interaction
         run: poetry install --no-interaction --no-root
       - name: Run bot
         run: |
