@@ -35,8 +35,6 @@ jobs:
       #   with:
       #     path: .venv
       #     key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('**/poetry.lock') }}
-       - name: Update lock file if needed
-        run: poetry lock --no-interaction --check || poetry lock --no-interaction
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
       - name: Run bot
@@ -53,4 +51,3 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
-                
